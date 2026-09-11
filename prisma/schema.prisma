@@ -1,0 +1,324 @@
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id          String   @id @default(cuid())
+  clerkUserId String   @unique
+  email       String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  creditAccount CreditAccount?
+  chats         Chat[]
+  ledger        CreditLedger[]
+  attachments        Attachment[]
+  runs               AgentRun[]
+  apiKeys            ApiKey[]
+  webhookEndpoints   WebhookEndpoint[]
+}
+
+model CreditAccount {
+  id                 String   @id @default(cuid())
+  userId             String   @unique
+  user               User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  balance            Int      @default(0)
+  monthlyUploadBytes BigInt   @default(0)
+  updatedAt          DateTime @updatedAt
+}
+
+enum LedgerKind {
+  admission_reserve
+  admission_release
+  tool_charge
+  refund
+  grant
+}
+
+model CreditLedger {
+  id               String     @id @default(cuid())
+  userId           String
+  user             User       @relation(fields: [userId], references: [id], onDelete: Cascade)
+  runId            String?
+  run              AgentRun?  @relation(fields: [runId], references: [id], onDelete: SetNull)
+  toolInvocationId String?
+  kind             LedgerKind
+  amount           Int
+  settlementKey    String     @unique
+  note             String?
+  createdAt        DateTime   @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model Chat {
+  id          String    @id @default(cuid())
+  userId      String
+  user        User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  title       String    @default("New chat")
+  pinned      Boolean   @default(false)
+  favorited   Boolean   @default(false)
+  deletedAt   DateTime?
+  activeRunId String?   @unique
+  activeRun   AgentRun? @relation("ChatActiveRun", fields: [activeRunId], references: [id], onDelete: SetNull)
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+
+  messages    Message[]
+  runs        AgentRun[]    @relation("ChatRuns")
+  attachments Attachment[]
+
+  @@index([userId, updatedAt(sort: Desc), id(sort: Desc)])
+  @@index([userId, favorited, updatedAt(sort: Desc), id(sort: Desc)])
+}
+
+enum MessageRole {
+  user
+  assistant
+  system
+  tool
+}
+
+enum MessageStatus {
+  success
+  failed
+  cancelled
+}
+
+model Message {
+  id                   String        @id @default(cuid())
+  chatId               String
+  chat                 Chat          @relation(fields: [chatId], references: [id], onDelete: Cascade)
+  runId                String?
+  role                 MessageRole
+  status               MessageStatus @default(success)
+  blocks               Json
+  clientIdempotencyKey String?
+  createdAt            DateTime      @default(now())
+
+  attachments Attachment[]
+
+  @@unique([chatId, clientIdempotencyKey])
+  @@index([chatId, createdAt(sort: Desc), id(sort: Desc)])
+}
+
+enum AgentRunStatus {
+  queued
+  thinking
+  working
+  waiting
+  stopping
+  complete
+  failed
+  cancelled
+}
+
+model AgentRun {
+  id                 String         @id @default(cuid())
+  chatId             String
+  chat               Chat           @relation("ChatRuns", fields: [chatId], references: [id], onDelete: Cascade)
+  userId             String
+  user               User           @relation(fields: [userId], references: [id], onDelete: Cascade)
+  userMessageId      String
+  assistantMessageId String?
+  status             AgentRunStatus @default(queued)
+  modelRequested     String
+  modelRouted        String?
+  dispatchKey        String         @unique
+  triggerRunId       String?
+  sessionSnapshot    Json?
+  errorCode          String?
+  errorSafeMessage   String?
+  admissionReserved  Int            @default(0)
+  creditsSettled     Int            @default(0)
+  startedAt          DateTime?
+  finishedAt         DateTime?
+  createdAt          DateTime       @default(now())
+
+  asActiveFor     Chat?             @relation("ChatActiveRun")
+  toolInvocations ToolInvocation[]
+  runSkills       RunSkill[]
+  waitpoints      Waitpoint[]
+  generatedAssets GeneratedAsset[]
+  ledger          CreditLedger[]
+
+  @@index([chatId, createdAt(sort: Desc)])
+}
+
+enum ToolProvider {
+  magica
+  skill
+  internal
+}
+
+enum ToolInvocationStatus {
+  pending
+  running
+  completed
+  failed
+  cancelled
+}
+
+model ToolInvocation {
+  id               String                @id @default(cuid())
+  runId            String
+  run              AgentRun              @relation(fields: [runId], references: [id], onDelete: Cascade)
+  chatId           String
+  toolName         String
+  provider         ToolProvider
+  providerRunId    String?
+  status           ToolInvocationStatus  @default(pending)
+  input            Json
+  output           Json?
+  errorSafeMessage String?
+  creditCost       Int                   @default(0)
+  completionKey    String                @unique
+  startedAt        DateTime?
+  finishedAt       DateTime?
+  durationMs       Int?
+
+  generatedAssets GeneratedAsset[]
+}
+
+model RunSkill {
+  id          String   @id @default(cuid())
+  runId       String
+  run         AgentRun @relation(fields: [runId], references: [id], onDelete: Cascade)
+  skillName   String
+  contentHash String
+  assetPath   String?
+  createdAt   DateTime @default(now())
+
+  @@unique([runId, skillName, assetPath])
+}
+
+enum WaitpointKind {
+  options
+  plan
+  credit
+  media
+}
+
+enum WaitpointStatus {
+  open
+  approved
+  rejected
+  expired
+}
+
+model Waitpoint {
+  id        String          @id @default(cuid())
+  token     String          @unique
+  runId     String
+  run       AgentRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  kind      WaitpointKind
+  payload   Json
+  status    WaitpointStatus @default(open)
+  resumeKey String          @unique
+  expiresAt DateTime
+  createdAt DateTime        @default(now())
+}
+
+enum AttachmentSource {
+  direct_upload
+  media_library
+}
+
+model Attachment {
+  id             String           @id @default(cuid())
+  userId         String
+  user           User             @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chatId         String?
+  chat           Chat?            @relation(fields: [chatId], references: [id], onDelete: SetNull)
+  messageId      String?
+  message        Message?         @relation(fields: [messageId], references: [id], onDelete: SetNull)
+  source         AttachmentSource
+  sortOrder      Int              @default(0)
+  assemblyId     String?
+  assemblyStatus String?
+  mimeType       String
+  byteSize       BigInt
+  originalName   String
+  resultUrl      String?
+  durableUrl     String?
+  checksum       String?
+  createdAt      DateTime         @default(now())
+
+  @@index([chatId, sortOrder])
+}
+
+enum AssetKind {
+  image
+  video
+  audio
+}
+
+model GeneratedAsset {
+  id               String          @id @default(cuid())
+  runId            String
+  run              AgentRun        @relation(fields: [runId], references: [id], onDelete: Cascade)
+  toolInvocationId String?
+  toolInvocation   ToolInvocation? @relation(fields: [toolInvocationId], references: [id], onDelete: SetNull)
+  kind             AssetKind
+  url              String
+  durableUrl       String?
+  mimeType         String?
+  provider         String
+  createdAt        DateTime        @default(now())
+}
+
+model ApiKey {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  name       String
+  prefix     String
+  hash       String    @unique
+  lastUsedAt DateTime?
+  revokedAt  DateTime?
+  createdAt  DateTime  @default(now())
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+model WebhookEndpoint {
+  id         String    @id @default(cuid())
+  userId     String
+  user       User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  url        String
+  secret     String
+  events     String[]
+  disabledAt DateTime?
+  createdAt  DateTime  @default(now())
+
+  deliveries WebhookDelivery[]
+
+  @@index([userId, createdAt(sort: Desc)])
+}
+
+enum WebhookDeliveryStatus {
+  pending
+  delivered
+  failed
+}
+
+model WebhookDelivery {
+  id          String                 @id @default(cuid())
+  endpointId  String
+  endpoint    WebhookEndpoint        @relation(fields: [endpointId], references: [id], onDelete: Cascade)
+  eventId     String                 @unique
+  event       String
+  payload     Json
+  status      WebhookDeliveryStatus  @default(pending)
+  attempts    Int                    @default(0)
+  lastError   String?
+  createdAt   DateTime               @default(now())
+  deliveredAt DateTime?
+
+  @@index([endpointId, createdAt(sort: Desc)])
+}

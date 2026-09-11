@@ -1,0 +1,15 @@
+export const LIMITS = {
+  model: "openrouter/free",
+  maxMessageChars: 32_000,
+  admissionReserve: 1,
+  initialGrant: 1_000,
+  pageSizeChats: 30,
+  pageSizeMessages: 50,
+  contextWindowMessages: 40,
+  rateLimitPerMinute: 20,
+  persistIntervalMs: 400,
+  openRouterMaxRetries: 3,
+  maxToolIterations: 12,
+  waitpointTtlMinutes: 30,
+  creditWaitThreshold: 1,
+} as const;
