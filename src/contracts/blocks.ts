@@ -48,6 +48,7 @@ export const usageBlockSchema = z.object({
   promptTokens: z.number().int().nonnegative(),
   completionTokens: z.number().int().nonnegative(),
   applicationCredits: z.number().int().nonnegative(),
+  magicaCreditUsed: z.number().nonnegative().optional(),
 });
 
 export const contentBlockSchema = z.discriminatedUnion("type", [

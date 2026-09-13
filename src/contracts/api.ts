@@ -19,7 +19,7 @@ export const sendTurnRequestSchema = z.object({
   planMode: z.boolean().optional(),
 });
 
-export const waitpointKindSchema = z.enum(["options", "plan", "credit", "media"]);
+export const waitpointKindSchema = z.enum(["options", "plan", "credit", "media", "questions"]);
 export const waitpointStatusSchema = z.enum(["open", "approved", "rejected", "expired"]);
 
 export const waitpointChoiceSchema = z.object({
@@ -27,14 +27,31 @@ export const waitpointChoiceSchema = z.object({
   label: z.string(),
 });
 
+export const waitpointQuestionChoiceSchema = z.object({
+  id: z.string(),
+  label: z.string(),
+  description: z.string().optional(),
+});
+
+export const waitpointQuestionSchema = z.object({
+  id: z.string(),
+  prompt: z.string(),
+  required: z.boolean().optional(),
+  placeholder: z.string().optional(),
+  answer: z.string().optional(),
+  choices: z.array(waitpointQuestionChoiceSchema).optional(),
+});
+
 export const waitpointPayloadSchema = z.object({
   title: z.string(),
   summary: z.string(),
+  message: z.string().optional(),
   estimateCredits: z.number().optional(),
   toolName: z.string().optional(),
   mediaUrls: z.array(z.string()).optional(),
   choices: z.array(waitpointChoiceSchema).optional(),
   selectedChoiceId: z.string().optional(),
+  questions: z.array(waitpointQuestionSchema).optional(),
 });
 
 export const waitpointSchema = z.object({
@@ -53,6 +70,7 @@ export const resumeWaitpointRequestSchema = z.object({
   resumeKey: z.string().min(8),
   decision: z.enum(["approved", "rejected"]),
   choiceId: z.string().optional(),
+  answers: z.record(z.string(), z.string()).optional(),
 });
 
 export const generatedAssetSchema = z.object({
@@ -80,12 +98,50 @@ export const sessionSnapshotSchema = z.object({
     )
     .optional(),
   pendingPhase: z.enum(["plan", "tools"]).optional(),
+  skipWaitpoints: z.boolean().optional(),
+  publicToolOnly: z.boolean().optional(),
+  questionAnswers: z.record(z.string(), z.record(z.string(), z.string())).optional(),
 });
 
-export const realtimeAccessSchema = z.object({
-  transport: z.enum(["poll", "trigger", "sse"]),
-  pollUrl: z.string(),
-  eventsUrl: z.string().optional(),
+export const chatCompletionsRequestSchema = z.object({
+  model: z.literal(LIMITS.model).default(LIMITS.model),
+  messages: z
+    .array(
+      z.object({
+        role: z.enum(["user", "assistant", "system"]),
+        content: z.string().trim().min(1).max(LIMITS.maxMessageChars),
+      }),
+    )
+    .min(1),
+  chatId: z.string().optional(),
+  clientIdempotencyKey: z.string().min(8).max(128).optional(),
+  planMode: z.boolean().optional(),
+});
+
+export const REALTIME_STREAMS = {
+  thinking: "thinking",
+  assistant: "assistant",
+} as const;
+
+export const realtimeAccessSchema = z.discriminatedUnion("transport", [
+  z.object({
+    transport: z.literal("poll"),
+    pollUrl: z.string(),
+  }),
+  z.object({
+    transport: z.literal("trigger"),
+    pollUrl: z.string(),
+    triggerRunId: z.string(),
+    publicAccessToken: z.string(),
+    streams: z.object({
+      thinking: z.literal(REALTIME_STREAMS.thinking),
+      assistant: z.literal(REALTIME_STREAMS.assistant),
+    }),
+  }),
+]);
+
+export const realtimeTokenResponseSchema = z.object({
+  token: z.string(),
 });
 
 export const sendTurnResponseSchema = z.object({
@@ -120,6 +176,15 @@ export const patchChatRequestSchema = z.object({
   pinned: z.boolean().optional(),
 });
 
+export const messageAttachmentSchema = z.object({
+  id: z.string(),
+  mimeType: z.string(),
+  originalName: z.string(),
+  resultUrl: z.string().nullable(),
+  durableUrl: z.string().nullable(),
+  sortOrder: z.number(),
+});
+
 export const messageSchema = z.object({
   id: z.string(),
   chatId: z.string(),
@@ -127,6 +192,7 @@ export const messageSchema = z.object({
   role: z.enum(["user", "assistant", "system", "tool"]),
   status: z.enum(["success", "failed", "cancelled"]),
   blocks: contentBlocksSchema,
+  attachments: z.array(messageAttachmentSchema).optional(),
   createdAt: z.string(),
 });
 
@@ -159,6 +225,9 @@ export const runResponseSchema = z.object({
   assistant: messageSchema.nullable(),
   waitpoint: waitpointSchema.nullable(),
   generatedAssets: z.array(generatedAssetSchema),
+  pendingTool: z.string().optional(),
+  triggerRunId: z.string().optional(),
+  realtime: realtimeAccessSchema.optional(),
   createdAt: z.string(),
 });
 
@@ -175,8 +244,11 @@ export type Message = z.infer<typeof messageSchema>;
 export type MessageListResponse = z.infer<typeof messageListResponseSchema>;
 export type RunResponse = z.infer<typeof runResponseSchema>;
 export type CreditsResponse = z.infer<typeof creditsResponseSchema>;
+export type RealtimeAccess = z.infer<typeof realtimeAccessSchema>;
+export type RealtimeTokenResponse = z.infer<typeof realtimeTokenResponseSchema>;
 export type Waitpoint = z.infer<typeof waitpointSchema>;
 export type WaitpointPayload = z.infer<typeof waitpointPayloadSchema>;
 export type ResumeWaitpointRequest = z.infer<typeof resumeWaitpointRequestSchema>;
 export type GeneratedAsset = z.infer<typeof generatedAssetSchema>;
 export type SessionSnapshot = z.infer<typeof sessionSnapshotSchema>;
+export type ChatCompletionsRequest = z.infer<typeof chatCompletionsRequestSchema>;

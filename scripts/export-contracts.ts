@@ -39,6 +39,7 @@ export type ContentBlock =
       promptTokens: number;
       completionTokens: number;
       applicationCredits: number;
+      magicaCreditUsed?: number;
     };
 
 export type ErrorEnvelope = {
@@ -70,6 +71,7 @@ export type Message = {
   role: Role;
   status: MessageStatus;
   blocks: ContentBlock[];
+  attachments?: Attachment[];
   createdAt: string;
 };
 
@@ -86,8 +88,17 @@ export type SendTurnRequest = {
   planMode?: boolean;
 };
 
-export type WaitpointKind = "options" | "plan" | "credit" | "media";
+export type WaitpointKind = "options" | "plan" | "credit" | "media" | "questions";
 export type WaitpointStatus = "open" | "approved" | "rejected" | "expired";
+
+export type WaitpointQuestion = {
+  id: string;
+  prompt: string;
+  required?: boolean;
+  placeholder?: string;
+  answer?: string;
+  choices?: { id: string; label: string; description?: string }[];
+};
 
 export type Waitpoint = {
   id: string;
@@ -97,11 +108,13 @@ export type Waitpoint = {
   payload: {
     title: string;
     summary: string;
+    message?: string;
     estimateCredits?: number;
     toolName?: string;
     mediaUrls?: string[];
     choices?: { id: string; label: string }[];
     selectedChoiceId?: string;
+    questions?: WaitpointQuestion[];
   };
   status: WaitpointStatus;
   resumeKey: string;
@@ -118,15 +131,26 @@ export type GeneratedAsset = {
   createdAt: string;
 };
 
+export const REALTIME_STREAMS = {
+  thinking: "thinking",
+  assistant: "assistant",
+} as const;
+
+export type RealtimeAccess =
+  | { transport: "poll"; pollUrl: string }
+  | {
+      transport: "trigger";
+      pollUrl: string;
+      triggerRunId: string;
+      publicAccessToken: string;
+      streams: { thinking: "thinking"; assistant: "assistant" };
+    };
+
 export type SendTurnResponse = {
   chatId: string;
   messageId: string;
   runId: string;
-  realtime: {
-    transport: "poll" | "trigger" | "sse";
-    pollUrl: string;
-    eventsUrl?: string;
-  };
+  realtime: RealtimeAccess;
 };
 
 export type Attachment = {
@@ -151,6 +175,9 @@ export type RunResponse = {
   assistant: Message | null;
   waitpoint: Waitpoint | null;
   generatedAssets: GeneratedAsset[];
+  pendingTool?: string;
+  triggerRunId?: string;
+  realtime?: RealtimeAccess;
   createdAt: string;
 };
 
