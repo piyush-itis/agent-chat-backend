@@ -136,6 +136,10 @@ model AgentRun {
   errorSafeMessage   String?
   admissionReserved  Int            @default(0)
   creditsSettled     Int            @default(0)
+  leaseId            String?
+  leaseUntil         DateTime?
+  lastHeartbeatAt    DateTime?
+  dispatchAttempt    Int            @default(1)
   startedAt          DateTime?
   finishedAt         DateTime?
   createdAt          DateTime       @default(now())
@@ -147,7 +151,8 @@ model AgentRun {
   generatedAssets GeneratedAsset[]
   ledger          CreditLedger[]
 
-  @@index([chatId, createdAt(sort: Desc)])
+  @@index([chatId, createdAt(sort: Desc), id(sort: Desc)])
+  @@index([status, leaseUntil])
 }
 
 enum ToolProvider {
@@ -202,6 +207,7 @@ enum WaitpointKind {
   plan
   credit
   media
+  questions
 }
 
 enum WaitpointStatus {
