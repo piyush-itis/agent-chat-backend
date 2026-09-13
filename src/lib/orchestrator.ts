@@ -6,7 +6,7 @@ import { LIMITS } from "@/contracts/limits";
 import type { SessionSnapshot } from "@/contracts/api";
 import { prisma } from "./db";
 import { ApiError } from "./errors";
-import { hasCredits } from "./credits";
+import { creditsFromTokens, hasCredits, settleModelCharge } from "./credits";
 import { streamOpenRouterFree, type ChatTurn, type ToolCall } from "./openrouter";
 import { getTool, listTools, type ToolContext } from "./registry";
 import { parseBlocks } from "./serialize";
@@ -28,6 +28,8 @@ import {
 } from "./merge-source";
 import { alreadyGenerated, dropCompletedGenerateCalls, lastSuccessfulGenerateOutput } from "./generate-source";
 import { historyTurnsForModel, textFromBlocks } from "./history-turns";
+import { nextLiveRunStatus } from "./run-status";
+import { hadSuccessfulMagicaWork, needsMagicaTools } from "./turn-intent";
 import {
   applyCropTargetToArgs,
   askQuestionsInput,
@@ -66,6 +68,24 @@ function sumMagicaCreditUsed(blocks: ContentBlock[]): number {
   }, 0);
 }
 
+async function settleOpenRouterUsage(
+  userId: string,
+  runId: string,
+  promptTokens: number,
+  completionTokens: number,
+): Promise<number> {
+  await settleModelCharge({
+    userId,
+    runId,
+    amount: creditsFromTokens(promptTokens, completionTokens),
+  });
+  const settled = await prisma.agentRun.findUnique({
+    where: { id: runId },
+    select: { creditsSettled: true },
+  });
+  return settled?.creditsSettled ?? 0;
+}
+
 function usageBlock(
   modelRouted: string | null,
   promptTokens: number,
@@ -84,7 +104,15 @@ function usageBlock(
   };
 }
 
-function systemPrompt(planMode: boolean): string {
+function systemPrompt(planMode: boolean, chatOnly = false): string {
+  if (chatOnly) {
+    return [
+      "You are Galaxy Agent Chat.",
+      "Reply in one or two short sentences.",
+      "Do not call tools. Do not mention APIs, models, or safety ratings.",
+      "Do not write a safety evaluation.",
+    ].join("\n");
+  }
   return [
     "You are Galaxy Agent Chat.",
     "Use only the OpenRouter free route. Do not suggest paid models.",
@@ -149,23 +177,34 @@ export async function runAgentTurn(runId: string): Promise<void> {
   });
   const chronological = history.reverse();
 
-  const messages: ChatTurn[] = [
-    { role: "system", content: systemPrompt(Boolean(snapshot.planMode)) },
-    ...historyTurnsForModel(
-      chronological.map((message) => ({
-        role: message.role,
-        status: message.status,
-        blocks: parseBlocks(message.blocks),
-      })),
-    ),
-  ];
-
   const attachments = await prisma.attachment.findMany({
     where: { chatId: run.chatId },
     orderBy: { sortOrder: "asc" },
     take: 20,
   });
-  if (attachments.length > 0) {
+  const thisTurnAttachments = attachments.filter((item) => item.messageId === run.userMessageId);
+  const historyForModel = chronological.map((message) => ({
+    role: message.role,
+    status: message.status,
+    blocks: parseBlocks(message.blocks),
+  }));
+  const lastUserPreview = [...chronological].reverse().find((message) => message.role === "user");
+  const lastUserPreviewText = lastUserPreview ? textFromBlocks(parseBlocks(lastUserPreview.blocks)) : "";
+  const chatOnly = !needsMagicaTools({
+    userText: lastUserPreviewText,
+    thisTurnAttachmentCount: thisTurnAttachments.length,
+    snapshot,
+    hadRecentMagicaWork: hadSuccessfulMagicaWork(historyForModel),
+  });
+  console.info(
+    `[agent.turn] run=${runId} chatOnly=${chatOnly} text=${JSON.stringify(lastUserPreviewText.slice(0, 80))}`,
+  );
+
+  const messages: ChatTurn[] = [
+    { role: "system", content: systemPrompt(Boolean(snapshot.planMode), chatOnly) },
+    ...historyTurnsForModel(historyForModel),
+  ];
+  if (!chatOnly && attachments.length > 0) {
     messages.push({
       role: "system",
       content: `User media: ${attachments
@@ -173,7 +212,7 @@ export async function runAgentTurn(runId: string): Promise<void> {
         .join(" | ")}`,
     });
   }
-  const cropHint = cropTargetInstruction(snapshot);
+  const cropHint = chatOnly ? null : cropTargetInstruction(snapshot);
   if (cropHint) {
     messages.push({ role: "system", content: cropHint });
   }
@@ -198,16 +237,20 @@ export async function runAgentTurn(runId: string): Promise<void> {
       data: { blocks: asJson(blocks) },
     });
     const current = await prisma.agentRun.findUnique({ where: { id: runId } });
+    if (current && ["complete", "failed", "cancelled"].includes(current.status)) {
+      throw new LostLease();
+    }
     const openWait = current ? await findOpenWaitpoint(runId) : null;
-    let nextStatus = current?.status ?? "working";
-    if (openWait) {
-      nextStatus = "waiting";
-    } else if (current && !["waiting", "stopping", "cancelled"].includes(current.status)) {
+    const nextStatus = nextLiveRunStatus({
+      currentStatus: current?.status ?? "thinking",
+      openWait: Boolean(openWait),
+      blocks,
+    });
+    if (current && current.status !== nextStatus) {
       await prisma.agentRun.update({
         where: { id: runId },
-        data: { status: "working" },
+        data: { status: nextStatus },
       });
-      nextStatus = "working";
     }
     await publishRunMetaFromBlocks({
       status: nextStatus,
@@ -226,7 +269,7 @@ export async function runAgentTurn(runId: string): Promise<void> {
   try {
     const lastUser = [...chronological].reverse().find((message) => message.role === "user");
     const lastUserText = lastUser ? textFromBlocks(parseBlocks(lastUser.blocks)) : "";
-    if (!snapshot.pendingToolCalls?.length && needsCropTarget(lastUserText, snapshot)) {
+    if (!chatOnly && !snapshot.pendingToolCalls?.length && needsCropTarget(lastUserText, snapshot)) {
       await executeAskQuestions(
         {
           runId,
@@ -259,8 +302,8 @@ export async function runAgentTurn(runId: string): Promise<void> {
       await mergeSnapshot(runId, { pendingToolCalls: [], pendingPhase: undefined });
       await persist(true);
       if (snapshot.publicToolOnly) {
-        const settled = await prisma.agentRun.findUnique({ where: { id: runId } });
-        blocks.push(usageBlock(modelRouted, promptTokens, completionTokens, settled?.creditsSettled ?? 0, blocks));
+        const creditsSettled = await settleOpenRouterUsage(run.userId, runId, promptTokens, completionTokens);
+        blocks.push(usageBlock(modelRouted, promptTokens, completionTokens, creditsSettled, blocks));
         await finalizeRun(runId, {
           status: "complete",
           blocks,
@@ -275,13 +318,15 @@ export async function runAgentTurn(runId: string): Promise<void> {
     const liveAfterPending = parseSnapshot(
       (await prisma.agentRun.findUnique({ where: { id: runId } }))?.sessionSnapshot,
     );
-    const cropSourceUrl = await latestCropImageUrl(run.chatId, run.userMessageId);
-    const autoCrop = buildAutoCropCall({
-      userMessageId: run.userMessageId,
-      imageUrl: cropSourceUrl,
-      snapshot: liveAfterPending,
-      alreadyCropped: alreadyCropped(blocks),
-    });
+    const cropSourceUrl = chatOnly ? undefined : await latestCropImageUrl(run.chatId, run.userMessageId);
+    const autoCrop = chatOnly
+      ? null
+      : buildAutoCropCall({
+          userMessageId: run.userMessageId,
+          imageUrl: cropSourceUrl,
+          snapshot: liveAfterPending,
+          alreadyCropped: alreadyCropped(blocks),
+        });
     if (autoCrop) {
       await maybePauseForToolPolicy(runId, liveAfterPending, [autoCrop]);
       await mergeSnapshot(runId, { pendingToolCalls: [autoCrop], pendingPhase: "tools" });
@@ -297,13 +342,15 @@ export async function runAgentTurn(runId: string): Promise<void> {
       await mergeSnapshot(runId, { pendingToolCalls: [], pendingPhase: undefined });
       await persist(true);
     }
-    const videoUrls = await chatVideoUrls(run.chatId, run.userMessageId);
-    const autoMerge = buildAutoMergeCall({
-      userMessageId: run.userMessageId,
-      userText: lastUserText,
-      videoUrls,
-      alreadyMerged: alreadyMerged(blocks),
-    });
+    const videoUrls = chatOnly ? [] : await chatVideoUrls(run.chatId, run.userMessageId);
+    const autoMerge = chatOnly
+      ? null
+      : buildAutoMergeCall({
+          userMessageId: run.userMessageId,
+          userText: lastUserText,
+          videoUrls,
+          alreadyMerged: alreadyMerged(blocks),
+        });
     if (autoMerge) {
       await maybePauseForToolPolicy(runId, liveAfterPending, [autoMerge]);
       await mergeSnapshot(runId, { pendingToolCalls: [autoMerge], pendingPhase: "tools" });
@@ -348,7 +395,7 @@ export async function runAgentTurn(runId: string): Promise<void> {
           noted.add(note);
         }
       }
-      tools = toOpenAiTools(omitTools);
+      tools = chatOnly ? [] : toOpenAiTools(omitTools);
       await assertRunNotStopping(runId);
       if (iteration > 0) {
         for (let index = blocks.length - 1; index >= 0; index -= 1) {
@@ -360,31 +407,57 @@ export async function runAgentTurn(runId: string): Promise<void> {
       await realtime.beginHop();
       let thinking = "";
       let text = "";
-      const result = await streamOpenRouterFree(
-        messages,
-        {
-          onThinking: async (delta, full) => {
-            thinking = full;
-            replaceOrPush(blocks, { type: "thinking", text: full });
-            realtime.appendThinking(delta);
-            await persist();
+      const hopStarted = Date.now();
+      let firstTokenAt: number | null = null;
+      const keepAlive = setInterval(() => {
+        void beat(true).catch(() => undefined);
+      }, HEARTBEAT_MS);
+      let result: Awaited<ReturnType<typeof streamOpenRouterFree>>;
+      try {
+        result = await streamOpenRouterFree(
+          messages,
+          {
+            onThinking: async (delta, full) => {
+              if (firstTokenAt == null) firstTokenAt = Date.now();
+              thinking = full;
+              replaceOrPush(blocks, { type: "thinking", text: full });
+              realtime.appendThinking(delta);
+              await persist();
+            },
+            onText: async (delta, full) => {
+              if (firstTokenAt == null) firstTokenAt = Date.now();
+              text = full;
+              replaceOrPush(blocks, { type: "text", text: full });
+              realtime.appendAssistant(delta);
+              await persist();
+            },
           },
-          onText: async (delta, full) => {
-            text = full;
-            replaceOrPush(blocks, { type: "text", text: full });
-            realtime.appendAssistant(delta);
-            await persist();
+          {
+            tools,
+            ...(chatOnly
+              ? {
+                  reasoningEffort: "none" as const,
+                  excludeReasoning: true,
+                  timeoutMs: LIMITS.chatOnlyTimeoutMs,
+                }
+              : {}),
           },
-        },
-        tools,
-      );
-      await realtime.flush();
+        );
+      } finally {
+        clearInterval(keepAlive);
+      }
       modelRouted = result.modelRouted ?? modelRouted;
       promptTokens += result.promptTokens;
       completionTokens += result.completionTokens;
       if (result.thinking) replaceOrPush(blocks, { type: "thinking", text: result.thinking });
       if (result.text) replaceOrPush(blocks, { type: "text", text: result.text });
+      console.info(
+        `[agent.turn] openrouter chatOnly=${chatOnly} model=${modelRouted ?? "unknown"} firstTokenMs=${
+          firstTokenAt ? firstTokenAt - hopStarted : -1
+        } totalMs=${Date.now() - hopStarted}`,
+      );
       await persist(true);
+      void realtime.flush().catch(() => undefined);
 
       if (snapshot.planMode && !snapshot.planApproved) {
         const planText = result.text || thinking || "The agent prepared a plan.";
@@ -428,13 +501,14 @@ export async function runAgentTurn(runId: string): Promise<void> {
       await persist(true);
     }
 
-    const settled = await prisma.agentRun.findUnique({ where: { id: runId } });
-    if (settled?.status === "stopping") {
+    const liveStatus = (await prisma.agentRun.findUnique({ where: { id: runId } }))?.status;
+    if (liveStatus === "stopping") {
       await finalizeCancelledRun(runId);
       await releaseLease(runId, leaseId);
       return;
     }
-    blocks.push(usageBlock(modelRouted, promptTokens, completionTokens, settled?.creditsSettled ?? 0, blocks));
+    const creditsSettled = await settleOpenRouterUsage(run.userId, runId, promptTokens, completionTokens);
+    blocks.push(usageBlock(modelRouted, promptTokens, completionTokens, creditsSettled, blocks));
 
     await finalizeRun(runId, {
       status: "complete",
@@ -469,6 +543,7 @@ export async function runAgentTurn(runId: string): Promise<void> {
         ? error.message
         : "The model or a tool failed. There is no paid fallback.";
     const code = error instanceof ApiError ? error.code : "MODEL_UNAVAILABLE";
+    await settleOpenRouterUsage(run.userId, runId, promptTokens, completionTokens).catch(() => undefined);
     await finalizeRun(runId, {
       status: "failed",
       blocks,

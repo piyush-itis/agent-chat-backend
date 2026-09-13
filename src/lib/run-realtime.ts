@@ -14,27 +14,47 @@ export type RunRealtimeMeta = {
 
 type StreamWriter = (chunk: string) => Promise<void>;
 
-function createPump(write: StreamWriter) {
+export const STREAM_APPEND_TIMEOUT_MS = 500;
+
+function writeWithTimeout(write: StreamWriter, chunk: string, timeoutMs: number): Promise<void> {
+  if (timeoutMs <= 0) return write(chunk);
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  return Promise.race([
+    write(chunk).finally(() => {
+      if (timer) clearTimeout(timer);
+    }),
+    new Promise<void>((_, reject) => {
+      timer = setTimeout(() => reject(new Error("STREAM_WRITE_TIMEOUT")), timeoutMs);
+    }),
+  ]);
+}
+
+export function createPump(write: StreamWriter, timeoutMs = STREAM_APPEND_TIMEOUT_MS) {
   let buffer = "";
   let sent = 0;
-  let writing = false;
+  let inflight: Promise<void> | null = null;
 
   const drain = async () => {
-    if (writing) return;
-    writing = true;
-    try {
-      while (buffer) {
-        const chunk = buffer;
-        buffer = "";
-        try {
-          await write(chunk);
-        } catch {
-          // no-op outside a Trigger task
+    if (inflight) return inflight;
+    inflight = (async () => {
+      try {
+        while (buffer) {
+          const chunk = buffer;
+          buffer = "";
+          try {
+            await writeWithTimeout(write, chunk, timeoutMs);
+          } catch {
+            // Drop a hung Trigger stream write; never block the turn.
+          }
+          sent += chunk.length;
         }
-        sent += chunk.length;
+      } finally {
+        inflight = null;
       }
+    })();
+    try {
+      await inflight;
     } finally {
-      writing = false;
       if (buffer) await drain();
     }
   };
@@ -49,16 +69,19 @@ function createPump(write: StreamWriter) {
       void drain();
     },
     async flush() {
-      while (buffer || writing) {
-        await drain();
+      while (buffer || inflight) {
+        await (inflight ?? drain());
       }
     },
   };
 }
 
-export function createRealtimePublisher(writers?: { thinking?: StreamWriter; assistant?: StreamWriter }) {
-  const thinking = createPump(writers?.thinking ?? ((chunk) => thinkingStream.append(chunk)));
-  const assistant = createPump(writers?.assistant ?? ((chunk) => assistantStream.append(chunk)));
+export function createRealtimePublisher(
+  writers?: { thinking?: StreamWriter; assistant?: StreamWriter },
+  timeoutMs = STREAM_APPEND_TIMEOUT_MS,
+) {
+  const thinking = createPump(writers?.thinking ?? ((chunk) => thinkingStream.append(chunk)), timeoutMs);
+  const assistant = createPump(writers?.assistant ?? ((chunk) => assistantStream.append(chunk)), timeoutMs);
   let thinkingOffset = 0;
   let assistantOffset = 0;
 

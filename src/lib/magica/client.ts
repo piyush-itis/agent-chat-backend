@@ -105,7 +105,7 @@ export function formatMagicaCredits(creditUsed: number | undefined): string {
 
 export function mapMagicaCredits(creditUsed: number | undefined): number {
   if (!creditUsed || creditUsed <= 0) return 0;
-  return Math.max(1, Math.round(creditUsed / 1_000_000));
+  return Math.round(creditUsed);
 }
 
 export function sleep(ms: number): Promise<void> {

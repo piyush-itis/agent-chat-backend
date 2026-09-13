@@ -30,7 +30,8 @@ describe("magica contracts", () => {
 
   it("maps Magica microcredits to application credits", () => {
     expect(mapMagicaCredits(0)).toBe(0);
-    expect(mapMagicaCredits(2_500_000)).toBe(3);
+    expect(mapMagicaCredits(214032)).toBe(214032);
+    expect(mapMagicaCredits(2_500_000)).toBe(2_500_000);
   });
 
   it("reads Magica creditUsed from the run or nested output", () => {

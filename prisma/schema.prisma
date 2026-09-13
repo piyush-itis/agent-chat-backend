@@ -36,6 +36,7 @@ enum LedgerKind {
   admission_reserve
   admission_release
   tool_charge
+  model_charge
   refund
   grant
 }

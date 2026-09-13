@@ -4,6 +4,8 @@ import { extname, join, normalize, relative, resolve, sep } from "node:path";
 
 export const SKILL_BODY_MAX_BYTES = 64 * 1024;
 export const SKILL_ASSET_MAX_BYTES = 512 * 1024;
+export const SKILL_DESCRIPTION_MAX = 512;
+export const SKILL_NAME_RE = /^[a-z](?:[a-z0-9-]{0,62}[a-z0-9])?$/;
 export const ALLOWED_ASSET_EXT = new Set([".md", ".txt", ".png", ".jpg", ".jpeg", ".webp", ".gif"]);
 
 export type SkillMeta = {
@@ -56,6 +58,18 @@ function yamlMatch(yaml: string, key: string): string | null {
   return line.slice(key.length + 1).trim().replace(/^['"]|['"]$/g, "");
 }
 
+export function assertSkillIdentity(folder: string, name: string, description: string): void {
+  if (!SKILL_NAME_RE.test(folder)) {
+    throw new SkillError("INVALID_NAME", `Skill folder must be kebab-case: ${folder}`);
+  }
+  if (name !== folder) {
+    throw new SkillError("NAME_MISMATCH", `Frontmatter name "${name}" must match folder "${folder}"`);
+  }
+  if (!description || description.length > SKILL_DESCRIPTION_MAX) {
+    throw new SkillError("MALFORMED_FRONTMATTER", "Description is missing or too long");
+  }
+}
+
 export function hashContent(value: string): string {
   return createHash("sha256").update(value).digest("hex");
 }
@@ -72,28 +86,36 @@ export function scanSkillDirectory(root: string): Map<string, LoadedSkill> {
     const dir = join(approvedRoot, entry.name);
     const skillPath = join(dir, "SKILL.md");
     if (!existsSync(skillPath)) continue;
-    const stat = statSync(skillPath);
-    if (stat.size > SKILL_BODY_MAX_BYTES) {
-      throw new SkillError("OVERSIZED", `SKILL.md too large in ${entry.name}`);
+    try {
+      const stat = statSync(skillPath);
+      if (stat.size > SKILL_BODY_MAX_BYTES) {
+        throw new SkillError("OVERSIZED", `SKILL.md too large in ${entry.name}`);
+      }
+      const raw = readFileSync(skillPath, "utf8");
+      const parsed = parseFrontmatter(raw);
+      assertSkillIdentity(entry.name, parsed.name, parsed.description);
+      if (skills.has(parsed.name)) {
+        throw new SkillError("DUPLICATE", `Duplicate skill name: ${parsed.name}`);
+      }
+      skills.set(parsed.name, {
+        name: parsed.name,
+        description: parsed.description,
+        dir,
+        body: parsed.body,
+        contentHash: hashContent(parsed.body),
+      });
+    } catch (error) {
+      if (error instanceof SkillError && error.code === "DUPLICATE") throw error;
+      continue;
     }
-    const raw = readFileSync(skillPath, "utf8");
-    const parsed = parseFrontmatter(raw);
-    if (skills.has(parsed.name)) {
-      throw new SkillError("DUPLICATE", `Duplicate skill name: ${parsed.name}`);
-    }
-    skills.set(parsed.name, {
-      name: parsed.name,
-      description: parsed.description,
-      dir,
-      body: parsed.body,
-      contentHash: hashContent(parsed.body),
-    });
   }
   return skills;
 }
 
 export function listSkillMeta(skills: Map<string, LoadedSkill>): SkillMeta[] {
-  return [...skills.values()].map(({ name, description }) => ({ name, description }));
+  return [...skills.values()]
+    .map(({ name, description }) => ({ name, description }))
+    .sort((left, right) => left.name.localeCompare(right.name));
 }
 
 export function readSkillAsset(
@@ -141,15 +163,33 @@ export function readSkillAsset(
   };
 }
 
-let cached: Map<string, LoadedSkill> | null = null;
+let cached: { root: string; fingerprint: string; skills: Map<string, LoadedSkill> } | null = null;
 
 export function defaultSkillsRoot(): string {
   return resolve(process.cwd(), "agent-skills");
 }
 
-export function getSkillMap(root = defaultSkillsRoot()): Map<string, LoadedSkill> {
-  cached ??= scanSkillDirectory(root);
-  return cached;
+function skillsFingerprint(root: string): string {
+  if (!existsSync(root)) return "";
+  return readdirSync(root, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory())
+    .map((entry) => {
+      const skillPath = join(root, entry.name, "SKILL.md");
+      if (!existsSync(skillPath)) return entry.name;
+      const stat = statSync(skillPath);
+      return `${entry.name}:${stat.mtimeMs}:${stat.size}`;
+    })
+    .sort()
+    .join("|");
+}
+
+export function getSkillMap(root?: string): Map<string, LoadedSkill> {
+  const resolved = root ?? cached?.root ?? defaultSkillsRoot();
+  const fingerprint = skillsFingerprint(resolved);
+  if (!cached || cached.root !== resolved || cached.fingerprint !== fingerprint) {
+    cached = { root: resolved, fingerprint, skills: scanSkillDirectory(resolved) };
+  }
+  return cached.skills;
 }
 
 export function resetSkillCache(): void {

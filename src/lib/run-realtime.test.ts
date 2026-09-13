@@ -21,12 +21,15 @@ describe("run-realtime", () => {
     const firstWrite = new Promise<void>((resolve) => {
       releaseFirst = resolve;
     });
-    const realtime = createRealtimePublisher({
-      thinking: async (chunk) => {
-        writes.push(chunk);
-        if (writes.length === 1) await firstWrite;
+    const realtime = createRealtimePublisher(
+      {
+        thinking: async (chunk) => {
+          writes.push(chunk);
+          if (writes.length === 1) await firstWrite;
+        },
       },
-    });
+      0,
+    );
     realtime.appendThinking("We");
     await Promise.resolve();
     realtime.appendThinking(" need");
@@ -39,6 +42,17 @@ describe("run-realtime", () => {
       thinkingOffset: "We need a short confirmation.".length,
       assistantOffset: 0,
     });
+  });
+
+  it("flushes even when Trigger stream.append never resolves", async () => {
+    const realtime = createRealtimePublisher(
+      {
+        thinking: () => new Promise(() => undefined),
+      },
+      40,
+    );
+    realtime.appendThinking("stuck");
+    await expect(realtime.flush()).resolves.toBeUndefined();
   });
 
   it("reads the pending tool from unmatched tool_use blocks", () => {

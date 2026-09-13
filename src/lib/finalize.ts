@@ -2,6 +2,7 @@ import { Prisma } from "@prisma/client";
 import type { ContentBlock } from "@/contracts/blocks";
 import { prisma } from "./db";
 import { parseBlocks } from "./serialize";
+import { publishRunMeta } from "./run-realtime";
 import { emitWebhook } from "./webhooks";
 
 function asJson(blocks: ContentBlock[]): Prisma.InputJsonValue {
@@ -26,7 +27,14 @@ export async function finalizeRun(
   if (TERMINAL.has(run.status)) return;
 
   const existing = await prisma.message.findUnique({ where: { id: run.assistantMessageId } });
-  const blocks = input.blocks ?? (existing ? parseBlocks(existing.blocks) : []);
+  let blocks = input.blocks ?? (existing ? parseBlocks(existing.blocks) : []);
+  if (
+    input.status === "failed" &&
+    input.errorSafeMessage &&
+    !blocks.some((block) => block.type === "text" && block.text.trim())
+  ) {
+    blocks = [...blocks, { type: "text", text: input.errorSafeMessage }];
+  }
 
   await prisma.$transaction(async (tx) => {
     await tx.message.update({
@@ -95,6 +103,7 @@ export async function finalizeRun(
     status: input.status,
     errorCode: input.errorCode ?? null,
   });
+  void publishRunMeta({ status: input.status, pendingTool: undefined, waitpoint: null });
 }
 
 export async function finalizeCancelledRun(runId: string, message = "Run stopped.") {

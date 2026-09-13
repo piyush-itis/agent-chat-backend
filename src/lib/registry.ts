@@ -103,7 +103,7 @@ registerTool({
   output: cropImageOutput,
   renderHint: "image",
   billable: true,
-  estimateCredits: async () => ({ applicationCredits: 1 }),
+  estimateCredits: async () => ({ applicationCredits: 200_000 }),
   execute: executeCropImage,
 });
 
@@ -114,7 +114,7 @@ registerTool({
   output: gptImageOutput,
   renderHint: "image",
   billable: true,
-  estimateCredits: async () => ({ applicationCredits: 1 }),
+  estimateCredits: async () => ({ applicationCredits: 200_000 }),
   execute: executeGptImage,
 });
 
@@ -125,6 +125,6 @@ registerTool({
   output: mergeVideosOutput,
   renderHint: "video",
   billable: true,
-  estimateCredits: async () => ({ applicationCredits: 1 }),
+  estimateCredits: async () => ({ applicationCredits: 200_000 }),
   execute: executeMergeVideos,
 });

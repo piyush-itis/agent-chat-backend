@@ -1,8 +1,7 @@
 import { schedules } from "@trigger.dev/sdk/v3";
 import { prisma } from "@/lib/db";
-import { dispatchAgentTurn, usesTriggerDispatch } from "@/lib/dispatch";
 import { finalizeCancelledRun } from "@/lib/finalize";
-import { bumpDispatchAttempt, dispatchKeyForAttempt } from "@/lib/run-lease";
+import { settleOrphanedLiveRuns } from "@/lib/recover-runs";
 import { expireOpenWaitpoints, unlockExpiredWaitpointRuns } from "@/lib/waitpoints";
 import { copyToDurableStorage, s3Configured } from "@/lib/storage";
 
@@ -35,21 +34,7 @@ export const reconcileTask = schedules.task({
       cancelled += 1;
     }
 
-    let redispatched = 0;
-    if (usesTriggerDispatch()) {
-      const orphans = await prisma.agentRun.findMany({
-        where: {
-          status: { in: ["queued", "thinking", "working"] },
-          OR: [...leaseExpired],
-        },
-        take: 25,
-      });
-      for (const run of orphans) {
-        const attempt = await bumpDispatchAttempt(run.id);
-        await dispatchAgentTurn(run.id, dispatchKeyForAttempt(run.dispatchKey, attempt));
-        redispatched += 1;
-      }
-    }
+    const { completed, failed, redispatched } = await settleOrphanedLiveRuns(25);
 
     let copied = 0;
     if (s3Configured()) {
@@ -67,6 +52,6 @@ export const reconcileTask = schedules.task({
       }
     }
 
-    return { expired: stale.length, unlocked, cancelled, redispatched, copied };
+    return { expired: stale.length, unlocked, cancelled, completed, failed, redispatched, copied };
   },
 });

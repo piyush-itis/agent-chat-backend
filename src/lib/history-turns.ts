@@ -10,16 +10,13 @@ export function textFromBlocks(blocks: ContentBlock[]): string {
 }
 
 export function assistantHistoryText(status: string, blocks: ContentBlock[]): string {
-  const text = textFromBlocks(blocks);
   if (status === "failed") {
-    return text
-      ? `${text}\n\n(Previous turn failed. Do not retry that request unless the user asks again.)`
-      : "(Previous turn failed. Do not retry that request unless the user asks again.)";
+    return "(Previous turn failed. Do not retry that request unless the user asks again.)";
   }
   if (status === "cancelled") {
-    return text || "(Previous turn was cancelled. Do not retry that request unless the user asks again.)";
+    return "(Previous turn was cancelled. Do not retry that request unless the user asks again.)";
   }
-  return text;
+  return textFromBlocks(blocks);
 }
 
 export function historyTurnsForModel(
