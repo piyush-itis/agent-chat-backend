@@ -1,6 +1,17 @@
 import { PrismaClient } from "@prisma/client";
 
-const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient };
+/** Bump when Prisma enums/schema change so the dev global client is recreated. */
+const PRISMA_CLIENT_REV = 3;
+
+const globalForPrisma = globalThis as unknown as {
+  prisma?: PrismaClient;
+  prismaRev?: number;
+};
+
+if (globalForPrisma.prisma && globalForPrisma.prismaRev !== PRISMA_CLIENT_REV) {
+  void globalForPrisma.prisma.$disconnect();
+  globalForPrisma.prisma = undefined;
+}
 
 export const prisma =
   globalForPrisma.prisma ??
@@ -10,4 +21,5 @@ export const prisma =
 
 if (process.env.NODE_ENV !== "production") {
   globalForPrisma.prisma = prisma;
+  globalForPrisma.prismaRev = PRISMA_CLIENT_REV;
 }

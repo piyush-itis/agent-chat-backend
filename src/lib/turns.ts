@@ -1,10 +1,11 @@
 import { Prisma } from "@prisma/client";
 import { LIMITS } from "@/contracts/limits";
-import type { SendTurnRequest, SendTurnResponse } from "@/contracts/api";
-import { requireOwnedChat, isActiveStatus } from "./chats";
+import type { ChatCompletionsRequest, SendTurnRequest, SendTurnResponse } from "@/contracts/api";
+import { createChat, requireOwnedChat, isActiveStatus } from "./chats";
 import { prisma } from "./db";
 import { jsonError } from "./errors";
 import { dispatchAgentTurn } from "./dispatch";
+import { realtimeAccessForRun } from "./realtime-access";
 
 export async function sendTurn(
   userId: string,
@@ -26,17 +27,11 @@ export async function sendTurn(
   if (existing?.runId) {
     const run = await prisma.agentRun.findUnique({ where: { id: existing.runId } });
     if (run) {
-      return toSendResponse(chatId, existing.id, run.id);
+      return await toSendResponse(chatId, existing.id, run.id);
     }
   }
 
-  const chat = await requireOwnedChat(userId, chatId);
-  if (chat.activeRunId) {
-    const active = await prisma.agentRun.findUnique({ where: { id: chat.activeRunId } });
-    if (active && isActiveStatus(active.status)) {
-      throw jsonError(409, "ACTIVE_RUN", "This chat already has an active run");
-    }
-  }
+  const chat = await claimActiveRun(userId, chatId);
 
   const account = await prisma.creditAccount.findUnique({ where: { userId } });
   if (!account || account.balance < LIMITS.admissionReserve) {
@@ -137,7 +132,7 @@ export async function sendTurn(
 
   await dispatchAgentTurn(result.run.id, result.run.dispatchKey);
 
-  return toSendResponse(chatId, result.userMessage.id, result.run.id);
+  return await toSendResponse(chatId, result.userMessage.id, result.run.id);
 }
 
 function titleFromText(text: string): string {
@@ -145,15 +140,53 @@ function titleFromText(text: string): string {
   return compact.length > 48 ? `${compact.slice(0, 45)}…` : compact || "New chat";
 }
 
-function toSendResponse(chatId: string, messageId: string, runId: string): SendTurnResponse {
+export async function sendChatCompletion(
+  userId: string,
+  input: ChatCompletionsRequest,
+): Promise<SendTurnResponse> {
+  if (input.model !== LIMITS.model) {
+    throw jsonError(400, "UNSUPPORTED_MODEL", "Only openrouter/free is allowed");
+  }
+  const lastUser = [...input.messages].reverse().find((message) => message.role === "user");
+  if (!lastUser) {
+    throw jsonError(400, "VALIDATION", "At least one user message is required");
+  }
+  const chat = input.chatId
+    ? await claimActiveRun(userId, input.chatId)
+    : await createChat(userId, titleFromText(lastUser.content));
+  return sendTurn(userId, chat.id, {
+    text: lastUser.content,
+    model: LIMITS.model,
+    clientIdempotencyKey: input.clientIdempotencyKey ?? `completions:${chat.id}:${randomIdempotencyKey()}`,
+    planMode: input.planMode,
+  });
+}
+
+function randomIdempotencyKey(): string {
+  return `cmp_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+}
+
+export async function claimActiveRun(userId: string, chatId: string) {
+  const chat = await requireOwnedChat(userId, chatId);
+  if (chat.activeRunId) {
+    const active = await prisma.agentRun.findUnique({ where: { id: chat.activeRunId } });
+    if (active && isActiveStatus(active.status)) {
+      throw jsonError(409, "ACTIVE_RUN", "This chat already has an active run");
+    }
+  }
+  return chat;
+}
+
+export async function toSendResponse(
+  chatId: string,
+  messageId: string,
+  runId: string,
+): Promise<SendTurnResponse> {
+  const run = await prisma.agentRun.findUnique({ where: { id: runId } });
   return {
     chatId,
     messageId,
     runId,
-    realtime: {
-      transport: process.env.TRIGGER_SECRET_KEY ? "trigger" : "sse",
-      pollUrl: `/api/runs/${runId}`,
-      eventsUrl: `/api/runs/${runId}/events`,
-    },
+    realtime: await realtimeAccessForRun(run),
   };
 }
