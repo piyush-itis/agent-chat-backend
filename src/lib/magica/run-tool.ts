@@ -1,10 +1,12 @@
 import { Prisma } from "@prisma/client";
 import { settleToolCharge } from "@/lib/credits";
+import { usesTriggerDispatch } from "@/lib/dispatch";
 import { jsonError } from "@/lib/errors";
 import { prisma } from "@/lib/db";
 import type { ToolContext } from "@/lib/registry";
 import { copyToDurableStorage } from "@/lib/storage";
-import { mapMagicaCredits, pollNodeRun, startNodeRun, type MagicaRun } from "./client";
+import { magicaRunTask } from "@/trigger/magica-run";
+import { mapMagicaCredits, pollNodeRun, readMagicaCreditUsed, startNodeRun, type MagicaRun } from "./client";
 
 export async function runMagicaTool(input: {
   ctx: ToolContext;
@@ -18,17 +20,19 @@ export async function runMagicaTool(input: {
   urls: string[];
   providerRunId: string;
   creditCost: number;
+  creditUsed: number;
   status: "completed" | "failed" | "cancelled";
 }> {
   const completionKey = `${input.ctx.runId}:${input.ctx.toolCallId}`;
   const existing = await prisma.toolInvocation.findUnique({ where: { completionKey } });
   if (existing?.status === "completed" && existing.output) {
-    const output = existing.output as { url?: string; urls?: string[] };
+    const output = existing.output as { url?: string; urls?: string[]; creditUsed?: number };
     return {
       url: output.url ?? output.urls?.[0] ?? "",
       urls: output.urls ?? (output.url ? [output.url] : []),
       providerRunId: existing.providerRunId ?? "",
       creditCost: existing.creditCost,
+      creditUsed: typeof output.creditUsed === "number" ? output.creditUsed : 0,
       status: "completed",
     };
   }
@@ -67,11 +71,10 @@ export async function runMagicaTool(input: {
     data: { providerRunId: started.runId, status: "running" },
   });
 
-  const run = await pollNodeRun(started.runId, {
-    shouldAbort: async () => {
-      const current = await prisma.agentRun.findUnique({ where: { id: input.ctx.runId } });
-      return current?.status === "stopping" || current?.status === "cancelled";
-    },
+  const run = await waitForMagicaRun({
+    providerRunId: started.runId,
+    parentRunId: input.ctx.runId,
+    completionKey,
   });
   if (run.status === "FAILED") {
     const message = run.userMessage ?? run.error ?? "Magica run failed";
@@ -92,13 +95,14 @@ export async function runMagicaTool(input: {
     throw jsonError(502, "PROVIDER_ERROR", "Magica returned no media");
   }
 
-  const creditCost = mapMagicaCredits(run.creditUsed);
+  const creditUsed = readMagicaCreditUsed(run);
+  const creditCost = mapMagicaCredits(creditUsed);
   const finishedAt = new Date();
   await prisma.toolInvocation.update({
     where: { id: invocation.id },
     data: {
       status: "completed",
-      output: { url: urls[0], urls } as Prisma.InputJsonValue,
+      output: { url: urls[0], urls, creditUsed } as Prisma.InputJsonValue,
       finishedAt,
       durationMs: invocation.startedAt ? finishedAt.getTime() - invocation.startedAt.getTime() : null,
     },
@@ -126,29 +130,91 @@ export async function runMagicaTool(input: {
     amount: creditCost,
   });
 
-  return { url: urls[0], urls, providerRunId: started.runId, creditCost, status: "completed" };
+  return { url: urls[0], urls, providerRunId: started.runId, creditCost, creditUsed, status: "completed" };
 }
 
-function extractMediaUrls(run: MagicaRun): string[] {
-  const output = run.output;
-  if (!output || typeof output !== "object") return [];
-  const record = output as Record<string, unknown>;
+export async function waitForMagicaRun(input: {
+  providerRunId: string;
+  parentRunId: string;
+  completionKey: string;
+}): Promise<MagicaRun> {
+  if (usesTriggerDispatch()) {
+    const result = await magicaRunTask.triggerAndWait(
+      { providerRunId: input.providerRunId, parentRunId: input.parentRunId },
+      { idempotencyKey: input.completionKey },
+    );
+    if (result.ok) return normalizeMagicaRun(result.output);
+    const message = result.error instanceof Error ? result.error.message : "Magica child task failed";
+    throw jsonError(502, "PROVIDER_ERROR", message);
+  }
+
+  return pollNodeRun(input.providerRunId, {
+    shouldAbort: async () => {
+      const current = await prisma.agentRun.findUnique({ where: { id: input.parentRunId } });
+      return current?.status === "stopping" || current?.status === "cancelled";
+    },
+  });
+}
+
+export function extractMediaUrls(run: MagicaRun): string[] {
+  const record = run as MagicaRun & { response?: unknown };
+  const bags = [record.output, record.response, record];
   const urls: string[] = [];
-  for (const key of ["image_url", "video_url", "url"]) {
-    if (typeof record[key] === "string") urls.push(record[key] as string);
+  for (const bag of bags) {
+    collectMediaUrls(bag, urls);
   }
-  for (const key of ["images", "videos", "urls"]) {
-    const value = record[key];
-    if (Array.isArray(value)) {
-      for (const item of value) {
-        if (typeof item === "string") urls.push(item);
-        if (item && typeof item === "object" && "url" in item && typeof item.url === "string") {
-          urls.push(item.url);
-        }
-      }
+  return [...new Set(urls.filter((url) => /^https?:\/\//.test(url)))];
+}
+
+function normalizeMagicaRun(value: unknown): MagicaRun {
+  if (!value || typeof value !== "object") {
+    throw jsonError(502, "PROVIDER_ERROR", "Magica child task returned empty output");
+  }
+  const record = value as Record<string, unknown>;
+  if (typeof record.status === "string") return value as MagicaRun;
+  const nested = record.output;
+  if (nested && typeof nested === "object" && typeof (nested as MagicaRun).status === "string") {
+    return nested as MagicaRun;
+  }
+  if (record.result || record.images || record.urls) {
+    return { id: "", status: "COMPLETED", output: value };
+  }
+  return value as MagicaRun;
+}
+
+function collectMediaUrls(value: unknown, urls: string[], depth = 0) {
+  if (value == null || depth > 4) return;
+  if (typeof value === "string") {
+    const parsed = tryParseJson(value);
+    if (parsed !== undefined) {
+      collectMediaUrls(parsed, urls, depth + 1);
+      return;
     }
+    if (/^https?:\/\//.test(value)) urls.push(value);
+    return;
   }
-  return urls;
+  if (Array.isArray(value)) {
+    for (const item of value) collectMediaUrls(item, urls, depth + 1);
+    return;
+  }
+  if (typeof value !== "object") return;
+  const record = value as Record<string, unknown>;
+  for (const key of ["image_url", "video_url", "url", "result"]) {
+    collectMediaUrls(record[key], urls, depth + 1);
+  }
+  for (const key of ["images", "videos", "urls", "assets"]) {
+    collectMediaUrls(record[key], urls, depth + 1);
+  }
+}
+
+function tryParseJson(value: string): unknown {
+  const trimmed = value.trim();
+  if (!trimmed.startsWith("{") && !trimmed.startsWith("[")) return undefined;
+  try {
+    return JSON.parse(trimmed);
+  } catch {
+    return undefined;
+  }
 }
 
 async function failInvocation(id: string, error: unknown) {

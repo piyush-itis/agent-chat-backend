@@ -5,87 +5,127 @@ import { prisma } from "./db";
 import { jsonError } from "./errors";
 import {
   cropImageInput,
-  executeCropImage,
-  executeGptImage,
-  executeMergeVideos,
   gptImageInput,
   mergeVideosInput,
 } from "./magica/tools";
-import type { ToolContext } from "./registry";
 import { createChat } from "./chats";
+import { claimActiveRun, toSendResponse } from "./turns";
+import { dispatchAgentTurn } from "./dispatch";
+
+const toolInputs = {
+  crop_image: cropImageInput,
+  gpt_image_2: gptImageInput,
+  merge_videos: mergeVideosInput,
+} as const;
+
+export type PublicToolName = keyof typeof toolInputs;
 
 export async function runPublicTool(
   userId: string,
-  toolName: "crop_image" | "gpt_image_2" | "merge_videos",
+  toolName: PublicToolName,
   input: Record<string, unknown>,
   chatId?: string,
 ) {
-  const chat = chatId ? { id: chatId } : await createChat(userId, `${toolName} run`);
-  if (chatId) {
-    const owned = await prisma.chat.findFirst({ where: { id: chatId, userId, deletedAt: null } });
-    if (!owned) throw jsonError(404, "NOT_FOUND", "Chat not found");
+  const parsed = toolInputs[toolName].safeParse(input);
+  if (!parsed.success) {
+    throw jsonError(400, "VALIDATION", parsed.error.issues[0]?.message ?? "Invalid tool input");
   }
 
-  const userMessage = await prisma.message.create({
-    data: {
-      chatId: chat.id,
-      role: "user",
-      status: "success",
-      blocks: [{ type: "text", text: `Run ${toolName}` }],
-    },
-  });
-  const assistantMessage = await prisma.message.create({
-    data: {
-      chatId: chat.id,
-      role: "assistant",
-      status: "success",
-      blocks: [],
-    },
-  });
-  const run = await prisma.agentRun.create({
-    data: {
-      chatId: chat.id,
-      userId,
-      userMessageId: userMessage.id,
-      assistantMessageId: assistantMessage.id,
-      status: "working",
-      modelRequested: LIMITS.model,
-      dispatchKey: `public-tool:${chat.id}:${randomUUID()}`,
-    },
-  });
-  await prisma.message.update({ where: { id: userMessage.id }, data: { runId: run.id } });
-  await prisma.message.update({ where: { id: assistantMessage.id }, data: { runId: run.id } });
+  const chat = chatId
+    ? await claimActiveRun(userId, chatId)
+    : await createChat(userId, `${toolName} run`);
 
-  const ctx: ToolContext = {
-    runId: run.id,
-    chatId: chat.id,
-    userId,
-    toolCallId: randomUUID(),
-  };
+  const account = await prisma.creditAccount.findUnique({ where: { userId } });
+  if (!account || account.balance < LIMITS.admissionReserve) {
+    throw jsonError(402, "INSUFFICIENT_CREDITS", "Not enough credits to start a turn");
+  }
 
-  let result: unknown;
-  if (toolName === "crop_image") result = await executeCropImage(ctx, cropImageInput.parse(input));
-  else if (toolName === "gpt_image_2") result = await executeGptImage(ctx, gptImageInput.parse(input));
-  else result = await executeMergeVideos(ctx, mergeVideosInput.parse(input));
+  const toolCallId = randomUUID();
+  const clientKey = `public-tool:${toolName}:${randomUUID()}`;
 
-  await prisma.agentRun.update({
-    where: { id: run.id },
-    data: { status: "complete", finishedAt: new Date() },
-  });
-  await prisma.message.update({
-    where: { id: assistantMessage.id },
-    data: {
-      blocks: [
-        {
-          type: "tool_result",
-          invocationId: ctx.toolCallId,
-          toolName,
-          output: result as Prisma.InputJsonValue,
+  let result: { runId: string; messageId: string; chatId: string; dispatchKey: string };
+  try {
+    result = await prisma.$transaction(async (tx) => {
+      const reserved = await tx.creditAccount.updateMany({
+        where: { userId, balance: { gte: LIMITS.admissionReserve } },
+        data: { balance: { decrement: LIMITS.admissionReserve } },
+      });
+      if (reserved.count !== 1) {
+        throw jsonError(402, "INSUFFICIENT_CREDITS", "Not enough credits to start a turn");
+      }
+
+      const userMessage = await tx.message.create({
+        data: {
+          chatId: chat.id,
+          role: "user",
           status: "success",
+          clientIdempotencyKey: clientKey,
+          blocks: [{ type: "text", text: `Run ${toolName}` }],
         },
-      ] as Prisma.InputJsonValue,
-    },
-  });
+      });
+      const assistantMessage = await tx.message.create({
+        data: {
+          chatId: chat.id,
+          role: "assistant",
+          status: "success",
+          blocks: [],
+        },
+      });
+      const run = await tx.agentRun.create({
+        data: {
+          chatId: chat.id,
+          userId,
+          userMessageId: userMessage.id,
+          assistantMessageId: assistantMessage.id,
+          status: "queued",
+          modelRequested: LIMITS.model,
+          dispatchKey: `dispatch:${chat.id}:${clientKey}`,
+          admissionReserved: LIMITS.admissionReserve,
+          sessionSnapshot: {
+            version: 1,
+            skipWaitpoints: true,
+            publicToolOnly: true,
+            pendingPhase: "tools",
+            pendingToolCalls: [
+              {
+                id: toolCallId,
+                name: toolName,
+                arguments: JSON.stringify(parsed.data),
+              },
+            ],
+          },
+        },
+      });
+      await tx.message.update({ where: { id: userMessage.id }, data: { runId: run.id } });
+      await tx.message.update({ where: { id: assistantMessage.id }, data: { runId: run.id } });
+      await tx.creditLedger.create({
+        data: {
+          userId,
+          runId: run.id,
+          kind: "admission_reserve",
+          amount: -LIMITS.admissionReserve,
+          settlementKey: `admission_reserve:${run.id}`,
+          note: "Admission reserve",
+        },
+      });
+      await tx.chat.update({
+        where: { id: chat.id },
+        data: { activeRunId: run.id, updatedAt: new Date() },
+      });
+      return {
+        runId: run.id,
+        messageId: userMessage.id,
+        chatId: chat.id,
+        dispatchKey: run.dispatchKey,
+      };
+    });
+  } catch (error) {
+    if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === "P2002") {
+      throw jsonError(409, "ACTIVE_RUN", "This chat already has an active run");
+    }
+    throw error;
+  }
 
-  return { chatId: chat.id, runId: run.id, result };
+  await dispatchAgentTurn(result.runId, result.dispatchKey);
+  return await toSendResponse(result.chatId, result.messageId, result.runId);
 }

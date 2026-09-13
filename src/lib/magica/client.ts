@@ -82,6 +82,27 @@ export async function estimateNodeCredits(nodes: unknown[]): Promise<{ total?: n
   }
 }
 
+function asCreditUsed(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
+}
+
+export function readMagicaCreditUsed(run: unknown): number {
+  if (!run || typeof run !== "object") return 0;
+  const record = run as Record<string, unknown>;
+  const top = asCreditUsed(record.creditUsed);
+  if (top) return top;
+  const output = record.output;
+  if (output && typeof output === "object" && !Array.isArray(output)) {
+    return asCreditUsed((output as Record<string, unknown>).creditUsed);
+  }
+  return 0;
+}
+
+export function formatMagicaCredits(creditUsed: number | undefined): string {
+  const units = asCreditUsed(creditUsed);
+  return `${(units / 1_000_000).toFixed(2)}M credits`;
+}
+
 export function mapMagicaCredits(creditUsed: number | undefined): number {
   if (!creditUsed || creditUsed <= 0) return 0;
   return Math.max(1, Math.round(creditUsed / 1_000_000));

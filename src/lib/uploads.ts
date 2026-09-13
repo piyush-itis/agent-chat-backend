@@ -59,10 +59,20 @@ export async function completeUpload(input: {
   byteSize: number;
   originalName: string;
   resultUrl?: string;
+  assemblyStatus?: string;
   sortOrder?: number;
 }) {
   if (!ALLOWED_MIME.includes(input.mimeType)) {
     throw jsonError(400, "VALIDATION", "Unsupported MIME type");
+  }
+  if (input.byteSize > MAX_FILE_BYTES) {
+    throw jsonError(400, "VALIDATION", "File exceeds the 0.5 GB Community-plan cap");
+  }
+  if (input.assemblyStatus && input.assemblyStatus !== "completed") {
+    throw jsonError(400, "VALIDATION", "Assembly is not completed");
+  }
+  if (!input.resultUrl) {
+    throw jsonError(400, "VALIDATION", "resultUrl is required to persist an attachment");
   }
   await assertUploadQuota(input.userId, input.byteSize);
   if (input.chatId) {
@@ -74,9 +84,9 @@ export async function completeUpload(input: {
   });
   if (existing) return existing;
 
-  const durableUrl = input.resultUrl
-    ? await copyToDurableStorage(input.resultUrl, `uploads/${input.userId}/${input.assemblyId}`)
-    : input.resultUrl;
+  const durableUrl =
+    (await copyToDurableStorage(input.resultUrl, `uploads/${input.userId}/${input.assemblyId}`)) ??
+    input.resultUrl;
 
   const attachment = await prisma.attachment.create({
     data: {
@@ -100,4 +110,13 @@ export async function completeUpload(input: {
   });
 
   return attachment;
+}
+
+export async function listAttachments(userId: string, chatId?: string) {
+  if (chatId) await requireOwnedChat(userId, chatId);
+  return prisma.attachment.findMany({
+    where: { userId, ...(chatId ? { chatId } : {}), resultUrl: { not: null } },
+    orderBy: [{ createdAt: "desc" }],
+    take: 40,
+  });
 }

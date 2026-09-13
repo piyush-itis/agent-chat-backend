@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { ALLOWED_MIME, MAX_FILE_BYTES, signAssembly } from "./uploads";
+import { ALLOWED_MIME, MAX_FILE_BYTES, completeUpload, signAssembly } from "./uploads";
 import { ApiError } from "./errors";
 
 describe("uploads", () => {
@@ -22,5 +22,30 @@ describe("uploads", () => {
     expect(ALLOWED_MIME).toContain("image/png");
     expect(ALLOWED_MIME).toContain("video/mp4");
     expect(MAX_FILE_BYTES).toBe(Math.floor(0.5 * 1024 * 1024 * 1024));
+  });
+
+  it("rejects complete without a resultUrl", async () => {
+    await expect(
+      completeUpload({
+        userId: "user_1",
+        assemblyId: "asm_1",
+        mimeType: "image/png",
+        byteSize: 12,
+        originalName: "a.png",
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "VALIDATION" } satisfies Partial<ApiError>);
+  });
+
+  it("rejects oversized files on complete", async () => {
+    await expect(
+      completeUpload({
+        userId: "user_1",
+        assemblyId: "asm_1",
+        mimeType: "image/png",
+        byteSize: MAX_FILE_BYTES + 1,
+        originalName: "huge.png",
+        resultUrl: "https://example.com/a.png",
+      }),
+    ).rejects.toMatchObject({ status: 400, code: "VALIDATION" } satisfies Partial<ApiError>);
   });
 });

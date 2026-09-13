@@ -12,7 +12,8 @@ const bodySchema = z.object({
   mimeType: z.string(),
   byteSize: z.number().int().positive(),
   originalName: z.string().min(1),
-  resultUrl: z.string().url().optional(),
+  resultUrl: z.string().url(),
+  assemblyStatus: z.string().optional(),
   sortOrder: z.number().int().nonnegative().optional(),
 });
 

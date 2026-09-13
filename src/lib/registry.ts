@@ -18,6 +18,7 @@ import {
   mergeVideosInput,
   mergeVideosOutput,
 } from "@/lib/magica/tools";
+import { askQuestionsInput, askQuestionsOutput, executeAskQuestions } from "@/lib/questions";
 import { SkillError } from "@/lib/skills/registry";
 
 export type CreditEstimate = { applicationCredits: number };
@@ -81,6 +82,18 @@ registerTool({
   billable: false,
   estimateCredits: async () => ({ applicationCredits: 0 }),
   execute: async (ctx, input) => executeReadSkillAsset(ctx, input).catch(skillErrorToResult),
+});
+
+registerTool({
+  name: "ask_questions",
+  description:
+    "Ask 1–3 clarifying questions only when generate/crop/merge is too vague to run. For crop without a ratio or region, ask exactly \"Choose a crop target\" with Square (1:1), Story / Reel (9:16), Portrait (4:5), Landscape (16:9), and Custom region or ratio. Skip this tool when the user already specified the subject and key details.",
+  input: askQuestionsInput,
+  output: askQuestionsOutput,
+  renderHint: "text",
+  billable: false,
+  estimateCredits: async () => ({ applicationCredits: 0 }),
+  execute: executeAskQuestions,
 });
 
 registerTool({
