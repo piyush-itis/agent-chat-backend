@@ -1,10 +1,12 @@
 import { runAgentTurn } from "./orchestrator";
+import { persistTriggerRunId } from "./run-lease";
+
+export function usesTriggerDispatch(): boolean {
+  return Boolean(process.env.TRIGGER_SECRET_KEY) && process.env.DISPATCH_MODE !== "inline";
+}
 
 export async function dispatchAgentTurn(runId: string, dispatchKey: string): Promise<void> {
-  const hasTrigger = Boolean(process.env.TRIGGER_SECRET_KEY);
-  const inline = process.env.DISPATCH_MODE === "inline" || !hasTrigger;
-
-  if (inline) {
+  if (!usesTriggerDispatch()) {
     void runAgentTurn(runId).catch((error) => {
       console.error(
         JSON.stringify({
@@ -19,5 +21,8 @@ export async function dispatchAgentTurn(runId: string, dispatchKey: string): Pro
   }
 
   const { agentTurnTask } = await import("@/trigger/agent-turn");
-  await agentTurnTask.trigger({ runId }, { idempotencyKey: dispatchKey });
+  const handle = await agentTurnTask.trigger({ runId }, { idempotencyKey: dispatchKey });
+  if (handle?.id) {
+    await persistTriggerRunId(runId, handle.id);
+  }
 }

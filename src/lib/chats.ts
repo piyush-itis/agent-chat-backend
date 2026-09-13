@@ -110,6 +110,7 @@ export async function listMessages(userId: string, chatId: string, cursorRaw: st
           }
         : {}),
     },
+    include: { attachments: { orderBy: { sortOrder: "asc" } } },
     orderBy: [{ createdAt: "desc" }, { id: "desc" }],
     take: take + 1,
   });

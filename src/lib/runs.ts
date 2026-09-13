@@ -15,5 +15,7 @@ export async function loadRunView(runId: string) {
       orderBy: { createdAt: "asc" },
     }),
   ]);
-  return serializeRun(run, assistant, { waitpoint, generatedAssets });
+  const view =
+    waitpoint && run.status === "working" ? { ...run, status: "waiting" as const } : run;
+  return serializeRun(view, assistant, { waitpoint, generatedAssets });
 }

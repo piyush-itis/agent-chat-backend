@@ -8,6 +8,8 @@ function asJson(blocks: ContentBlock[]): Prisma.InputJsonValue {
   return blocks as unknown as Prisma.InputJsonValue;
 }
 
+const TERMINAL = new Set(["complete", "failed", "cancelled"]);
+
 export async function finalizeRun(
   runId: string,
   input: {
@@ -21,6 +23,7 @@ export async function finalizeRun(
 ) {
   const run = await prisma.agentRun.findUnique({ where: { id: runId } });
   if (!run?.assistantMessageId) return;
+  if (TERMINAL.has(run.status)) return;
 
   const existing = await prisma.message.findUnique({ where: { id: run.assistantMessageId } });
   const blocks = input.blocks ?? (existing ? parseBlocks(existing.blocks) : []);
@@ -33,10 +36,6 @@ export async function finalizeRun(
 
     if (run.admissionReserved > 0) {
       try {
-        await tx.creditAccount.update({
-          where: { userId: run.userId },
-          data: { balance: { increment: run.admissionReserved } },
-        });
         await tx.creditLedger.create({
           data: {
             userId: run.userId,
@@ -47,6 +46,16 @@ export async function finalizeRun(
             note: "Unused admission released",
           },
         });
+        const cleared = await tx.agentRun.updateMany({
+          where: { id: runId, admissionReserved: { gt: 0 } },
+          data: { admissionReserved: 0 },
+        });
+        if (cleared.count === 1) {
+          await tx.creditAccount.update({
+            where: { userId: run.userId },
+            data: { balance: { increment: run.admissionReserved } },
+          });
+        }
       } catch (error) {
         if (!(error && typeof error === "object" && "code" in error && error.code === "P2002")) {
           throw error;
@@ -63,6 +72,8 @@ export async function finalizeRun(
         errorSafeMessage: input.errorSafeMessage,
         admissionReserved: 0,
         finishedAt: new Date(),
+        leaseId: null,
+        leaseUntil: null,
       },
     });
 

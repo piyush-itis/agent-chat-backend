@@ -1,7 +1,9 @@
-import type { AgentRun, Chat, GeneratedAsset, Message, Waitpoint } from "@prisma/client";
+import type { AgentRun, Attachment, Chat, GeneratedAsset, Message, Waitpoint } from "@prisma/client";
 import { contentBlocksSchema, type ContentBlock } from "@/contracts/blocks";
 import type { Chat as ChatDto, Message as MessageDto, RunResponse } from "@/contracts/api";
 import { serializeWaitpoint } from "./waitpoints";
+
+type MessageWithAttachments = Message & { attachments?: Attachment[] };
 
 export function serializeChat(chat: Chat): ChatDto {
   return {
@@ -21,7 +23,18 @@ export function parseBlocks(raw: unknown): ContentBlock[] {
   return [{ type: "text", text: "[Unable to render message content]" }];
 }
 
-export function serializeMessage(message: Message): MessageDto {
+export function serializeAttachment(item: Attachment) {
+  return {
+    id: item.id,
+    mimeType: item.mimeType,
+    originalName: item.originalName,
+    resultUrl: item.resultUrl,
+    durableUrl: item.durableUrl,
+    sortOrder: item.sortOrder,
+  };
+}
+
+export function serializeMessage(message: MessageWithAttachments): MessageDto {
   return {
     id: message.id,
     chatId: message.chatId,
@@ -29,6 +42,7 @@ export function serializeMessage(message: Message): MessageDto {
     role: message.role,
     status: message.status,
     blocks: parseBlocks(message.blocks),
+    attachments: message.attachments?.map(serializeAttachment),
     createdAt: message.createdAt.toISOString(),
   };
 }
@@ -58,6 +72,7 @@ export function serializeRun(
       mimeType: asset.mimeType,
       createdAt: asset.createdAt.toISOString(),
     })),
+    triggerRunId: run.triggerRunId ?? undefined,
     createdAt: run.createdAt.toISOString(),
   };
 }
