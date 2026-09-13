@@ -9,7 +9,9 @@
     "lint": "eslint",
     "contracts:export": "tsx scripts/export-contracts.ts",
     "prisma": "prisma",
-    "test": "vitest run"
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "trigger:dev": "trigger dev"
   },
   "dependencies": {
     "@clerk/backend": "^3.17.2",
@@ -31,6 +33,7 @@
     "eslint-config-next": "16.3.4",
     "prisma": "6.16.3",
     "tailwindcss": "^4",
+    "trigger.dev": "^4.5.16",
     "tsx": "^4.23.13",
     "typescript": "^5",
     "vitest": "^5.0.0"
