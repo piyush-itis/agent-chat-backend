@@ -130,7 +130,18 @@ export async function sendTurn(
     throw error;
   }
 
-  await dispatchAgentTurn(result.run.id, result.run.dispatchKey);
+  try {
+    await dispatchAgentTurn(result.run.id, result.run.dispatchKey);
+  } catch (error) {
+    console.error(
+      JSON.stringify({
+        level: "error",
+        runId: result.run.id,
+        err: String(error),
+        message: "dispatch failed after the turn was created",
+      }),
+    );
+  }
 
   return await toSendResponse(chatId, result.userMessage.id, result.run.id);
 }

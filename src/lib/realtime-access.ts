@@ -2,12 +2,14 @@ import { auth } from "@trigger.dev/sdk";
 import { REALTIME_STREAMS, type RealtimeAccess } from "@/contracts/api";
 import { isActiveStatus } from "./chats";
 import { usesTriggerDispatch } from "./dispatch";
+import { configureTriggerClient } from "./trigger-client";
 
 export function pollRealtime(runId: string): RealtimeAccess {
   return { transport: "poll", pollUrl: `/api/runs/${runId}` };
 }
 
 export async function mintTriggerRealtime(triggerRunId: string, runId: string): Promise<RealtimeAccess> {
+  configureTriggerClient();
   const publicAccessToken = await auth.createPublicToken({
     scopes: { read: { runs: [triggerRunId] } },
     expirationTime: "1hr",
