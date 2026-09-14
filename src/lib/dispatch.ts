@@ -22,6 +22,8 @@ export async function dispatchAgentTurn(runId: string, dispatchKey: string): Pro
   }
 
   configureTriggerClient();
+  const keyKind = (process.env.TRIGGER_SECRET_KEY ?? "").split("_").slice(0, 2).join("_");
+  console.info(JSON.stringify({ level: "info", runId, dispatchKey, triggerKeyKind: keyKind || "missing" }));
   const { agentTurnTask } = await import("@/trigger/agent-turn");
   const handle = await agentTurnTask.trigger({ runId }, { idempotencyKey: dispatchKey });
   if (handle?.id) {

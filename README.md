@@ -62,7 +62,7 @@ Copy [`.env.example`](./.env.example) to `.env`. Names only:
 | `OPENROUTER_BASE_URL` | no | Default `https://openrouter.ai/api/v1` |
 | `MAGICA_API_KEY` | yes for tools | Magica inference |
 | `MAGICA_BASE_URL` | yes for tools | e.g. `https://inference.magica.com` — do not hard-code a host in code |
-| `TRIGGER_SECRET_KEY` | yes for trigger mode | Worker + task dispatch |
+| `TRIGGER_SECRET_KEY` | yes for trigger mode | Worker + task dispatch. Vercel production must use the Trigger **prod** secret (`tr_prod_…`), not the local `tr_dev_…` key |
 | `TRIGGER_PROJECT_REF` | yes for trigger mode | `proj_…` from the Trigger dashboard |
 | `DISPATCH_MODE` | no | `trigger` (default) or `inline` |
 | `TRANSLOADIT_KEY` / `TRANSLOADIT_SECRET` | yes for attach | Signed assemblies. Key must be the Transloadit **Auth Key**, not a workspace nickname |

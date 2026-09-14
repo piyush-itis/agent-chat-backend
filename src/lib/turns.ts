@@ -5,6 +5,7 @@ import { createChat, requireOwnedChat, isActiveStatus } from "./chats";
 import { prisma } from "./db";
 import { jsonError } from "./errors";
 import { dispatchAgentTurn } from "./dispatch";
+import { finalizeRun } from "./finalize";
 import { realtimeAccessForRun } from "./realtime-access";
 
 export async function sendTurn(
@@ -141,6 +142,13 @@ export async function sendTurn(
         message: "dispatch failed after the turn was created",
       }),
     );
+    await finalizeRun(result.run.id, {
+      status: "failed",
+      messageStatus: "failed",
+      errorCode: "DISPATCH_FAILED",
+      errorSafeMessage: "Could not start the turn worker. Check that Vercel TRIGGER_SECRET_KEY is the Trigger production secret.",
+    });
+    throw jsonError(503, "DISPATCH_FAILED", "Could not start the turn worker");
   }
 
   return await toSendResponse(chatId, result.userMessage.id, result.run.id);
