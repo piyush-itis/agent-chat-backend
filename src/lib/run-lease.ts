@@ -35,6 +35,24 @@ export async function claimAgentRun(runId: string, leaseId: string = randomUUID(
   return updated === 1 ? leaseId : null;
 }
 
+export async function touchAgentRunLease(runId: string): Promise<void> {
+  const now = new Date();
+  const until = new Date(now.getTime() + LEASE_MS);
+  await prisma.$executeRaw`
+    UPDATE "AgentRun"
+    SET "leaseUntil" = ${until},
+        "lastHeartbeatAt" = ${now}
+    WHERE id = ${runId}
+      AND "leaseId" IS NOT NULL
+      AND status IN (
+        'queued'::"AgentRunStatus",
+        'thinking'::"AgentRunStatus",
+        'working'::"AgentRunStatus",
+        'stopping'::"AgentRunStatus"
+      )
+  `;
+}
+
 export async function heartbeatAgentRun(runId: string, leaseId: string): Promise<boolean> {
   const now = new Date();
   const until = new Date(now.getTime() + LEASE_MS);

@@ -61,6 +61,7 @@ export async function streamOpenRouterFree(
     try {
       return await streamOnce(messages, handlers, options);
     } catch (error) {
+      if (error instanceof Error && error.name === "RunStopped") throw error;
       lastError = error;
       const status = (error as { status?: number }).status;
       if (status === 429 && attempt < LIMITS.openRouterMaxRetries) {

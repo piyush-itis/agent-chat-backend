@@ -26,7 +26,12 @@ import {
   lastSuccessfulMergeOutput,
   resolveMergeVideoUrls,
 } from "./merge-source";
-import { alreadyGenerated, dropCompletedGenerateCalls, lastSuccessfulGenerateOutput } from "./generate-source";
+import {
+  alreadyGenerated,
+  dropCompletedGenerateCalls,
+  generateResultCount,
+  lastSuccessfulGenerateOutput,
+} from "./generate-source";
 import { historyTurnsForModel, textFromBlocks } from "./history-turns";
 import { nextLiveRunStatus } from "./run-status";
 import { hadSuccessfulMagicaWork, needsMagicaTools } from "./turn-intent";
@@ -394,6 +399,14 @@ export async function runAgentTurn(runId: string): Promise<void> {
           messages.push({ role: "system", content: note });
           noted.add(note);
         }
+      } else if (generateResultCount(blocks) >= 2) {
+        omitTools.push("gpt_image_2");
+        const note =
+          "Image generation already failed twice this turn. Do not call gpt_image_2 again. Tell the user it did not complete.";
+        if (!noted.has(note)) {
+          messages.push({ role: "system", content: note });
+          noted.add(note);
+        }
       }
       tools = chatOnly ? [] : toOpenAiTools(omitTools);
       await assertRunNotStopping(runId);
@@ -418,6 +431,7 @@ export async function runAgentTurn(runId: string): Promise<void> {
           messages,
           {
             onThinking: async (delta, full) => {
+              await assertRunNotStopping(runId);
               if (firstTokenAt == null) firstTokenAt = Date.now();
               thinking = full;
               replaceOrPush(blocks, { type: "thinking", text: full });
@@ -425,6 +439,7 @@ export async function runAgentTurn(runId: string): Promise<void> {
               await persist();
             },
             onText: async (delta, full) => {
+              await assertRunNotStopping(runId);
               if (firstTokenAt == null) firstTokenAt = Date.now();
               text = full;
               replaceOrPush(blocks, { type: "text", text: full });
@@ -559,7 +574,7 @@ export async function runAgentTurn(runId: string): Promise<void> {
 function dropRepeats(calls: ToolCall[], blocks: ContentBlock[]) {
   return dropCompletedGenerateCalls(
     dropCompletedMergeCalls(dropCompletedCropCalls(calls, alreadyCropped(blocks)), alreadyMerged(blocks)),
-    alreadyGenerated(blocks),
+    alreadyGenerated(blocks) || generateResultCount(blocks) >= 2,
   );
 }
 

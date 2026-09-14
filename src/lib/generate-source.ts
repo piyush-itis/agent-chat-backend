@@ -7,6 +7,10 @@ export function alreadyGenerated(blocks: ContentBlock[]) {
   );
 }
 
+export function generateResultCount(blocks: ContentBlock[]) {
+  return blocks.filter((block) => block.type === "tool_result" && block.toolName === "gpt_image_2").length;
+}
+
 export function dropCompletedGenerateCalls(calls: ToolCall[], generated: boolean) {
   if (!generated) return calls;
   return calls.filter((call) => call.name !== "gpt_image_2");

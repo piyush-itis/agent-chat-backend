@@ -4,6 +4,7 @@ import { usesTriggerDispatch } from "@/lib/dispatch";
 import { jsonError } from "@/lib/errors";
 import { prisma } from "@/lib/db";
 import type { ToolContext } from "@/lib/registry";
+import { HEARTBEAT_MS, touchAgentRunLease } from "@/lib/run-lease";
 import { copyToDurableStorage } from "@/lib/storage";
 import { magicaRunTask } from "@/trigger/magica-run";
 import { mapMagicaCredits, pollNodeRun, readMagicaCreditUsed, startNodeRun, type MagicaRun } from "./client";
@@ -26,31 +27,38 @@ export async function runMagicaTool(input: {
   const completionKey = `${input.ctx.runId}:${input.ctx.toolCallId}`;
   const existing = await prisma.toolInvocation.findUnique({ where: { completionKey } });
   if (existing?.status === "completed" && existing.output) {
-    const output = existing.output as { url?: string; urls?: string[]; creditUsed?: number };
-    return {
-      url: output.url ?? output.urls?.[0] ?? "",
-      urls: output.urls ?? (output.url ? [output.url] : []),
-      providerRunId: existing.providerRunId ?? "",
-      creditCost: existing.creditCost,
-      creditUsed: typeof output.creditUsed === "number" ? output.creditUsed : 0,
-      status: "completed",
-    };
+    return completedInvocationResult(existing);
   }
 
-  const invocation = existing
-    ? existing
-    : await prisma.toolInvocation.create({
-        data: {
+  const reusable = !existing
+    ? await prisma.toolInvocation.findFirst({
+        where: {
           runId: input.ctx.runId,
-          chatId: input.ctx.chatId,
           toolName: input.toolName,
-          provider: "magica",
-          status: "running",
-          input: input.providerInput as Prisma.InputJsonValue,
-          completionKey,
-          startedAt: new Date(),
+          status: { in: ["running", "completed"] },
         },
-      });
+        orderBy: { startedAt: "desc" },
+      })
+    : null;
+  if (reusable?.status === "completed" && reusable.output) {
+    return completedInvocationResult(reusable);
+  }
+
+  const invocation =
+    existing ??
+    (reusable?.status === "running" ? reusable : null) ??
+    (await prisma.toolInvocation.create({
+      data: {
+        runId: input.ctx.runId,
+        chatId: input.ctx.chatId,
+        toolName: input.toolName,
+        provider: "magica",
+        status: "running",
+        input: input.providerInput as Prisma.InputJsonValue,
+        completionKey,
+        startedAt: new Date(),
+      },
+    }));
 
   let started: { runId: string };
   try {
@@ -74,8 +82,12 @@ export async function runMagicaTool(input: {
   const run = await waitForMagicaRun({
     providerRunId: started.runId,
     parentRunId: input.ctx.runId,
-    completionKey,
+    completionKey: invocation.completionKey,
   });
+  const finished = await prisma.toolInvocation.findUnique({ where: { id: invocation.id } });
+  if (finished?.status === "completed" && finished.output) {
+    return completedInvocationResult(finished);
+  }
   if (run.status === "FAILED") {
     const message = run.userMessage ?? run.error ?? "Magica run failed";
     await failInvocation(invocation.id, jsonError(502, "PROVIDER_ERROR", message));
@@ -138,22 +150,47 @@ export async function waitForMagicaRun(input: {
   parentRunId: string;
   completionKey: string;
 }): Promise<MagicaRun> {
-  if (usesTriggerDispatch()) {
-    const result = await magicaRunTask.triggerAndWait(
-      { providerRunId: input.providerRunId, parentRunId: input.parentRunId },
-      { idempotencyKey: input.completionKey },
-    );
-    if (result.ok) return normalizeMagicaRun(result.output);
-    const message = result.error instanceof Error ? result.error.message : "Magica child task failed";
-    throw jsonError(502, "PROVIDER_ERROR", message);
-  }
+  const beat = setInterval(() => {
+    void touchAgentRunLease(input.parentRunId).catch(() => undefined);
+  }, HEARTBEAT_MS);
+  void touchAgentRunLease(input.parentRunId).catch(() => undefined);
+  try {
+    if (usesTriggerDispatch()) {
+      const result = await magicaRunTask.triggerAndWait(
+        { providerRunId: input.providerRunId, parentRunId: input.parentRunId },
+        { idempotencyKey: input.completionKey },
+      );
+      if (result.ok) return normalizeMagicaRun(result.output);
+      const message = result.error instanceof Error ? result.error.message : "Magica child task failed";
+      throw jsonError(502, "PROVIDER_ERROR", message);
+    }
 
-  return pollNodeRun(input.providerRunId, {
-    shouldAbort: async () => {
-      const current = await prisma.agentRun.findUnique({ where: { id: input.parentRunId } });
-      return current?.status === "stopping" || current?.status === "cancelled";
-    },
-  });
+    return await pollNodeRun(input.providerRunId, {
+      shouldAbort: async () => {
+        const current = await prisma.agentRun.findUnique({ where: { id: input.parentRunId } });
+        return current?.status === "stopping" || current?.status === "cancelled";
+      },
+      onTick: () => touchAgentRunLease(input.parentRunId),
+    });
+  } finally {
+    clearInterval(beat);
+  }
+}
+
+function completedInvocationResult(invocation: {
+  providerRunId?: string | null;
+  creditCost: number;
+  output: unknown;
+}) {
+  const output = invocation.output as { url?: string; urls?: string[]; creditUsed?: number };
+  return {
+    url: output.url ?? output.urls?.[0] ?? "",
+    urls: output.urls ?? (output.url ? [output.url] : []),
+    providerRunId: invocation.providerRunId ?? "",
+    creditCost: invocation.creditCost,
+    creditUsed: typeof output.creditUsed === "number" ? output.creditUsed : 0,
+    status: "completed" as const,
+  };
 }
 
 export function extractMediaUrls(run: MagicaRun): string[] {

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 const findRuns = vi.fn();
 const findMessage = vi.fn();
+const findInvocation = vi.fn();
 const findWaitpoint = vi.fn();
 const finalize = vi.fn();
 const dispatch = vi.fn();
@@ -11,6 +12,7 @@ vi.mock("./db", () => ({
   prisma: {
     agentRun: { findMany: (...args: unknown[]) => findRuns(...args) },
     message: { findUnique: (...args: unknown[]) => findMessage(...args) },
+    toolInvocation: { findFirst: (...args: unknown[]) => findInvocation(...args) },
   },
 }));
 vi.mock("./finalize", () => ({
@@ -33,12 +35,30 @@ describe("settleOrphanedLiveRuns", () => {
   beforeEach(() => {
     findRuns.mockReset();
     findMessage.mockReset();
+    findInvocation.mockReset();
     findWaitpoint.mockReset();
     finalize.mockReset();
     dispatch.mockReset();
     bump.mockReset();
     findWaitpoint.mockResolvedValue(null);
+    findInvocation.mockResolvedValue(null);
     bump.mockResolvedValue(2);
+  });
+
+  it("does not redispatch while a Magica tool is still running", async () => {
+    findRuns.mockResolvedValue([
+      {
+        id: "run_magica",
+        assistantMessageId: "a3",
+        sessionSnapshot: { version: 1, pendingToolCalls: [{ id: "g1", name: "gpt_image_2" }] },
+        dispatchKey: "d3",
+        dispatchAttempt: 1,
+      },
+    ]);
+    findInvocation.mockResolvedValue({ id: "inv_1" });
+    const { settleOrphanedLiveRuns } = await import("./recover-runs");
+    await expect(settleOrphanedLiveRuns()).resolves.toMatchObject({ redispatched: 0, completed: 0, failed: 0 });
+    expect(dispatch).not.toHaveBeenCalled();
   });
 
   it("completes an orphan that already has assistant text", async () => {

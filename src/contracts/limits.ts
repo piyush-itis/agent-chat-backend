@@ -11,6 +11,8 @@ export const LIMITS = {
   chatOnlyTimeoutMs: 12_000,
   openRouterMaxRetries: 3,
   maxToolIterations: 12,
+  magicaPollIntervalMs: 2_000,
+  magicaPollMaxAttempts: 180,
   waitpointTtlMinutes: 30,
   creditWaitThreshold: 1,
 } as const;

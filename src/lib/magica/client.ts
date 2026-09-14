@@ -1,3 +1,4 @@
+import { LIMITS } from "@/contracts/limits";
 import { jsonError } from "@/lib/errors";
 
 export type MagicaRunStatus = "QUEUED" | "RUNNING" | "COMPLETED" | "FAILED" | "CANCELED" | string;
@@ -118,16 +119,18 @@ export async function pollNodeRun(
     intervalMs?: number;
     maxAttempts?: number;
     shouldAbort?: () => Promise<boolean>;
+    onTick?: () => Promise<void>;
   } = {},
 ): Promise<MagicaRun> {
-  const intervalMs = options.intervalMs ?? 2000;
-  const maxAttempts = options.maxAttempts ?? 60;
+  const intervalMs = options.intervalMs ?? LIMITS.magicaPollIntervalMs;
+  const maxAttempts = options.maxAttempts ?? LIMITS.magicaPollMaxAttempts;
   const terminal = new Set(["COMPLETED", "FAILED", "CANCELED"]);
   let run = await getNodeRun(runId);
   for (let attempt = 0; attempt < maxAttempts && !terminal.has(run.status); attempt += 1) {
     if (options.shouldAbort && (await options.shouldAbort())) {
       throw jsonError(409, "CANCELLED", "Run was stopped");
     }
+    await options.onTick?.();
     await sleep(intervalMs);
     run = await getNodeRun(runId);
   }

@@ -182,7 +182,7 @@ CORS allows `FRONTEND_ORIGIN` with credentials.
 | GET | `/v1/runs/:runId` | Poll |
 | POST | `/v1/runs/:runId/waitpoints/:token/resume` | Resume waitpoint |
 
-Mintlify source for the public API lives in the repo [`docs/`](../docs/) folder.
+Mintlify source for the public API lives in [`../docs/`](../docs/). Preview with `npx mint@latest dev --port 3333` from that folder. Live API: `https://agent-chat-backend.vercel.app`.
 
 ### Outbound webhooks
 

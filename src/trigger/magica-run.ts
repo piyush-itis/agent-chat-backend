@@ -1,6 +1,7 @@
 import { task } from "@trigger.dev/sdk/v3";
 import { pollNodeRun } from "@/lib/magica/client";
 import { prisma } from "@/lib/db";
+import { touchAgentRunLease } from "@/lib/run-lease";
 
 export const magicaRunTask = task({
   id: "magica.run",
@@ -12,6 +13,7 @@ export const magicaRunTask = task({
         });
         return current?.status === "stopping" || current?.status === "cancelled";
       },
+      onTick: () => touchAgentRunLease(payload.parentRunId),
     });
   },
 });

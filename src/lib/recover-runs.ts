@@ -41,6 +41,12 @@ export async function settleOrphanedLiveRuns(limit = 25) {
   for (const run of orphans) {
     if (await findOpenWaitpoint(run.id)) continue;
 
+    const inflightMagica = await prisma.toolInvocation.findFirst({
+      where: { runId: run.id, provider: "magica", status: "running" },
+      select: { id: true },
+    });
+    if (inflightMagica) continue;
+
     const assistant = run.assistantMessageId
       ? await prisma.message.findUnique({ where: { id: run.assistantMessageId } })
       : null;

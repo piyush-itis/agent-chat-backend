@@ -41,4 +41,11 @@ describe("run lease", () => {
     const { bumpDispatchAttempt } = await import("./run-lease");
     expect(await bumpDispatchAttempt("run_1")).toBe(2);
   });
+
+  it("touches an active lease so Magica waits do not look orphaned", async () => {
+    executeRaw.mockResolvedValueOnce(1);
+    const { touchAgentRunLease } = await import("./run-lease");
+    await expect(touchAgentRunLease("run_1")).resolves.toBeUndefined();
+    expect(executeRaw).toHaveBeenCalledOnce();
+  });
 });
